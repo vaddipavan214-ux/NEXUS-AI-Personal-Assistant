@@ -1,19 +1,32 @@
 @import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
 
 :root {
-  --bg: #04060c;
-  --accent: #45d8ff;
-  --accent-dim: rgba(69, 216, 255, 0.35);
+  --bg-primary: #080B14;
+  --bg-secondary: #0D1020;
+  --bg-tertiary: #13182A;
+  --panel-bg: rgba(25, 30, 52, 0.72);
 
-  /* Orb / system state hues (updated at runtime) */
-  --state-hue: 195;
-  --state-color: hsl(var(--state-hue) 95% 62%);
-  --state-glow: hsl(var(--state-hue) 95% 62% / 0.22);
+  /* Nexus Palette */
+  --accent-violet: #8B5CF6;
+  --accent-violet-soft: #A78BFA;
+  --accent-cyan: #22D3EE;
+  --accent-blue: #60A5FA;
+  --text-primary: #F1F5F9;
+  --text-secondary: #A1A1AA;
+  --status-success: #34D399;
+  --status-warning: #FBBF24;
+  --status-error: #FB7185;
+
+  /* Dynamic System State Colors */
+  --state-color: #8B5CF6;
+  --state-glow: rgba(139, 92, 246, 0.28);
+  --state-cyan-glow: rgba(34, 211, 238, 0.22);
 }
 
 @theme inline {
-  --color-background: var(--bg);
-  --color-accent: var(--accent);
+  --color-background: var(--bg-primary);
+  --color-accent: var(--accent-violet);
   --font-sans: var(--font-grotesk);
   --font-mono: var(--font-geist-mono);
 }
@@ -24,74 +37,83 @@ body {
 }
 
 body {
-  background: var(--bg);
-  color: #e6edf6;
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font-family: var(--font-grotesk), system-ui, sans-serif;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: rgba(69, 216, 255, 0.25);
+  background: rgba(139, 92, 246, 0.35);
+  color: #FFFFFF;
 }
 
 /* ------------------------------------------------------------------ */
-/* Scene backdrop                                                      */
+/* Neural Command Center Backdrop                                     */
 /* ------------------------------------------------------------------ */
 
 .scene {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(1200px 800px at 50% 42%, var(--state-glow), transparent 65%),
-    radial-gradient(900px 600px at 12% 100%, rgba(80, 90, 220, 0.08), transparent 60%),
-    radial-gradient(900px 600px at 88% 100%, rgba(30, 190, 220, 0.06), transparent 60%),
-    var(--bg);
-  transition: background 1.2s ease;
+    radial-gradient(1100px 750px at 50% 38%, var(--state-glow), transparent 62%),
+    radial-gradient(900px 600px at 15% 15%, rgba(139, 92, 246, 0.08), transparent 55%),
+    radial-gradient(900px 600px at 85% 85%, rgba(34, 211, 238, 0.07), transparent 55%),
+    linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+  transition: background 0.8s ease;
 }
 
 .scene-grid {
   position: fixed;
   inset: 0;
   background-image:
-    linear-gradient(rgba(120, 170, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(120, 170, 255, 0.035) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(ellipse 90% 80% at 50% 45%, black 20%, transparent 75%);
+    linear-gradient(rgba(139, 92, 246, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.025) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(ellipse 85% 75% at 50% 45%, black 20%, transparent 75%);
   pointer-events: none;
 }
 
 .scene-noise {
   position: fixed;
   inset: 0;
-  opacity: 0.35;
+  opacity: 0.22;
   pointer-events: none;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 /* ------------------------------------------------------------------ */
-/* Glass panels                                                        */
+/* Holographic Glass Panels                                           */
 /* ------------------------------------------------------------------ */
 
 .glass {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015));
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  background: linear-gradient(180deg, rgba(25, 30, 52, 0.78), rgba(15, 19, 36, 0.82));
+  border: 1px solid rgba(139, 92, 246, 0.14);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 12px 40px rgba(0, 0, 0, 0.45);
+    inset 0 0 20px rgba(139, 92, 246, 0.03),
+    0 16px 45px rgba(0, 0, 0, 0.55);
 }
 
 .glass-card {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01));
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(180deg, rgba(25, 30, 52, 0.72), rgba(13, 16, 32, 0.65));
+  border: 1px solid rgba(139, 92, 246, 0.12);
   border-radius: 14px;
-  transition: border-color 0.4s ease, box-shadow 0.4s ease;
+  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 4px 20px rgba(0, 0, 0, 0.25);
 }
 
 .glass-card:hover {
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: rgba(34, 211, 238, 0.3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 25px rgba(34, 211, 238, 0.08),
+    0 8px 30px rgba(0, 0, 0, 0.35);
 }
 
 .card-pulse {
@@ -104,20 +126,20 @@ body {
     box-shadow: 0 0 24px var(--state-glow), inset 0 0 18px var(--state-glow);
   }
   100% {
-    border-color: rgba(255, 255, 255, 0.07);
+    border-color: rgba(139, 92, 246, 0.12);
     box-shadow: none;
   }
 }
 
 /* ------------------------------------------------------------------ */
-/* Typography helpers                                                  */
+/* Typography Helpers                                                 */
 /* ------------------------------------------------------------------ */
 
 .label-xs {
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  font-size: 12px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: rgba(210, 226, 245, 0.42);
+  color: var(--text-secondary);
   font-weight: 600;
 }
 
@@ -126,26 +148,29 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* Scrollbars                                                          */
+/* Scrollbars                                                         */
 /* ------------------------------------------------------------------ */
 
 .scroll-thin {
   scrollbar-width: thin;
-  scrollbar-color: rgba(140, 180, 220, 0.16) transparent;
+  scrollbar-color: rgba(139, 92, 246, 0.2) transparent;
 }
 .scroll-thin::-webkit-scrollbar {
   width: 5px;
 }
 .scroll-thin::-webkit-scrollbar-thumb {
-  background: rgba(140, 180, 220, 0.16);
+  background: rgba(139, 92, 246, 0.25);
   border-radius: 3px;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(34, 211, 238, 0.4);
 }
 .scroll-thin::-webkit-scrollbar-track {
   background: transparent;
 }
 
 /* ------------------------------------------------------------------ */
-/* Misc animation                                                      */
+/* Sci-Fi Animations                                                  */
 /* ------------------------------------------------------------------ */
 
 @keyframes blink {
@@ -165,17 +190,39 @@ body {
 .shimmer-text {
   background: linear-gradient(
     90deg,
-    rgba(230, 237, 246, 0.55) 40%,
-    #ffffff 50%,
-    rgba(230, 237, 246, 0.55) 60%
+    rgba(167, 139, 250, 0.7) 35%,
+    #22D3EE 50%,
+    rgba(167, 139, 250, 0.7) 65%
   );
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: shimmer 2.4s linear infinite;
+  animation: shimmer 2.6s linear infinite;
 }
 
-.text-glow {
-  text-shadow: 0 0 18px var(--state-glow);
+.text-glow-violet {
+  text-shadow: 0 0 16px rgba(139, 92, 246, 0.55);
+}
+
+.text-glow-cyan {
+  text-shadow: 0 0 16px rgba(34, 211, 238, 0.55);
+}
+
+@keyframes radarSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.radar-spin {
+  animation: radarSpin 20s linear infinite;
+}
+
+@keyframes reverseRadarSpin {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+.reverse-radar-spin {
+  animation: reverseRadarSpin 28s linear infinite;
 }

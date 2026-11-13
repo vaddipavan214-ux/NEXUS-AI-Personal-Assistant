@@ -10,6 +10,8 @@ export const SERVICES: Record<string, { name: string; description: string }> = {
   gmail: { name: "Gmail", description: "Read and search email" },
   googlecalendar: { name: "Google Calendar", description: "View and create events" },
   notion: { name: "Notion", description: "Search notes and documents" },
+  youtube: { name: "YouTube", description: "Search videos and view channel information" },
+  google_maps: { name: "Google Maps", description: "Search places, view locations and directions" },
 };
 
 export function getComposio() {
@@ -79,7 +81,10 @@ export const initiateConnection = action({
 
       return { ok: true as const, redirectUrl, service: service.name };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      let message = err instanceof Error ? err.message : String(err);
+      if (message.includes("auth_configs") && (message.includes("permission") || message.includes("403") || message.includes("InsufficientPermissions"))) {
+        message = 'Your Composio API key does not have write access for "auth_configs". Please create a new key with write permissions at https://app.composio.dev/settings/api-keys, then update Convex using: npx convex env set COMPOSIO_API_KEY <your_new_key>';
+      }
       await ctx.runMutation(api.connections.upsert, {
         toolkit,
         name: service.name,
@@ -106,20 +111,32 @@ export const checkConnection = action({
 
     const composio = getComposio();
     try {
-      const accounts = await composio.connectedAccounts.list({
+      const userAccounts = await composio.connectedAccounts.list({
         userIds: [String(userId)],
         toolkitSlugs: [toolkit],
       });
-      const active = accounts.items?.find(
+      let active = userAccounts.items?.find(
         (a: { status: string }) => a.status === "ACTIVE"
       );
+      if (!active) {
+        const allAccounts = await composio.connectedAccounts.list({
+          toolkitSlugs: [toolkit],
+        });
+        active = allAccounts.items?.find(
+          (a: { status: string }) => a.status === "ACTIVE"
+        );
+      }
       if (!active) return { connected: false };
+
+      const rawAcc = active as any;
+      const accountEntityId = rawAcc.userId || rawAcc.user_id || undefined;
 
       await ctx.runMutation(api.connections.upsert, {
         toolkit,
         name: service.name,
         status: "connected",
         connectedAccountId: active.id,
+        accountLabel: accountEntityId,
         lastSync: Date.now(),
       });
       await ctx.runMutation(api.timeline.log, {
@@ -160,18 +177,27 @@ export const syncConnections = action({
     if (!process.env.COMPOSIO_API_KEY) return { synced: false };
     try {
       const composio = getComposio();
-      const accounts = await composio.connectedAccounts.list({
+      const userAccounts = await composio.connectedAccounts.list({
         userIds: [String(userId)],
       });
-      for (const account of accounts.items ?? []) {
-        const slug = (account.toolkit?.slug ?? "").toLowerCase();
-        const svc = SERVICES[slug];
-        if (svc && account.status === "ACTIVE") {
+      const allAccounts = await composio.connectedAccounts.list({});
+      const combined = [...(userAccounts.items ?? []), ...(allAccounts.items ?? [])];
+
+      for (const [slug, svc] of Object.entries(SERVICES)) {
+        const matching = combined.find(
+          (a) =>
+            (a.toolkit?.slug ?? "").toLowerCase() === slug &&
+            a.status === "ACTIVE"
+        );
+        if (matching) {
+          const rawAcc = matching as any;
+          const accountEntityId = rawAcc.userId || rawAcc.user_id || undefined;
           await ctx.runMutation(api.connections.upsert, {
             toolkit: slug,
             name: svc.name,
             status: "connected",
-            connectedAccountId: account.id,
+            connectedAccountId: matching.id,
+            accountLabel: accountEntityId,
           });
         }
       }

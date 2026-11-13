@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAction, useMutation } from "convex/react";
+import { useMutation } from "convex/react";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { api } from "../../convex/_generated/api";
 import { OrbState } from "@/lib/types";
@@ -16,8 +16,16 @@ interface RealtimeSession {
   activate: () => Promise<void>;
   deactivate: () => void;
   getLevel: () => number;
-  /** Inject a system note (e.g. "Gmail connected") and have Jarvis respond. */
+  /** Inject a system note (e.g. "Gmail connected") and have Nexus respond. */
   notifySystem: (text: string) => void;
+  /** Immediately halt speech synthesis output. */
+  stopSpeaking: () => void;
+  /** Direct text command submission from keyboard. */
+  sendTextMessage: (text: string) => Promise<void>;
+  /** Whether Nexus is actively outputting speech. */
+  isSpeaking: boolean;
+  /** Active tool name being executed by the neural engine. */
+  activeTool: string | null;
 }
 
 function rms(analyser: AnalyserNode, buf: Uint8Array<ArrayBuffer>): number {
@@ -30,39 +38,103 @@ function rms(analyser: AnalyserNode, buf: Uint8Array<ArrayBuffer>): number {
   return Math.min(1, Math.sqrt(sum / buf.length) * 3.2);
 }
 
+function getAuthTokenFallback(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.includes("__convexAuthJWT")) {
+        const val = localStorage.getItem(key);
+        if (val) return val;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** Clean markdown syntax for natural browser speech synthesis. */
+function sanitizeForSpeech(text: string): string {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/_(.*?)_/g, "$1")
+    .replace(/`{1,3}[^`]*`{1,3}/g, "")
+    .replace(/https?:\/\/\S+/g, "link")
+    .replace(/[#>\-~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function useRealtimeSession(): RealtimeSession {
   const [orbState, setOrbStateRaw] = useState<OrbState>("idle");
   const [active, setActive] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSpeakingState, setIsSpeakingState] = useState(false);
+  const [activeTool, setActiveTool] = useState<string | null>(null);
 
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const dcRef = useRef<RTCDataChannel | null>(null);
+  const activeRef = useRef(false);
+  const orbStateRef = useRef<OrbState>("idle");
+  const isSpeakingRef = useRef(false);
+  const isProcessingRef = useRef(false);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const userLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          userLocationRef.current = {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+          };
+        },
+        () => {},
+        { timeout: 8000 }
+      );
+    }
+  }, []);
+
+  // Audio & Mic analysis
   const micStreamRef = useRef<MediaStream | null>(null);
-  const audioElRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const micAnalyserRef = useRef<AnalyserNode | null>(null);
-  const outAnalyserRef = useRef<AnalyserNode | null>(null);
   const levelBufRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
 
-  const orbStateRef = useRef<OrbState>("idle");
-  const speakingRef = useRef(false);
-  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // call_id -> tool name, populated from response.output_item.added
-  const callNamesRef = useRef<Map<string, string>>(new Map());
-  // itemId -> accumulated transcript text
-  const textAccumRef = useRef<Map<string, string>>(new Map());
-  const flushTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Browser Speech Recognition & Synthesis
+  const recognitionRef = useRef<any>(null);
+  const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  // Conversation history for Groq context
+  const conversationHistoryRef = useRef<Array<{ role: "user" | "assistant"; content: string }>>([]);
+
+  // Active user turn tracking
+  const currentTurnItemIdRef = useRef<string | null>(null);
+  const currentTurnTextRef = useRef<string>("");
+  const turnSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const authToken = useAuthToken();
   const authTokenRef = useRef<string | null>(null);
   authTokenRef.current = authToken ?? null;
 
-  const executeTool = useAction(api.tools.execute);
   const upsertStreaming = useMutation(api.messages.upsertStreaming);
   const finalizeMessage = useMutation(api.messages.finalize);
   const logTimeline = useMutation(api.timeline.log);
   const setVoiceState = useMutation(api.voiceState.set);
+
+  // Load browser speech synthesis voices
+  useEffect(() => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    const updateVoices = () => {
+      speechVoicesRef.current = window.speechSynthesis.getVoices();
+    };
+    updateVoices();
+    window.speechSynthesis.onvoiceschanged = updateVoices;
+  }, []);
 
   const setOrb = useCallback(
     (state: OrbState, opts?: { flashBackTo?: OrbState; flashMs?: number }) => {
@@ -72,12 +144,12 @@ export function useRealtimeSession(): RealtimeSession {
       }
       orbStateRef.current = state;
       setOrbStateRaw(state);
-      void setVoiceState({ orbState: state, sessionActive: true }).catch(() => {});
+      void setVoiceState({ orbState: state, sessionActive: activeRef.current }).catch(() => {});
       if (opts?.flashBackTo) {
         flashTimerRef.current = setTimeout(() => {
           orbStateRef.current = opts.flashBackTo!;
           setOrbStateRaw(opts.flashBackTo!);
-          void setVoiceState({ orbState: opts.flashBackTo!, sessionActive: true }).catch(() => {});
+          void setVoiceState({ orbState: opts.flashBackTo!, sessionActive: activeRef.current }).catch(() => {});
         }, opts.flashMs ?? 1000);
       }
     },
@@ -85,238 +157,380 @@ export function useRealtimeSession(): RealtimeSession {
   );
 
   /* -------------------------------------------------------------- */
-  /* Transcript streaming (throttled per item)                       */
+  /* Text to Speech (Jarvis Voice)                                  */
   /* -------------------------------------------------------------- */
 
-  const streamText = useCallback(
-    (itemId: string, role: "user" | "assistant", delta: string) => {
-      const acc = (textAccumRef.current.get(itemId) ?? "") + delta;
-      textAccumRef.current.set(itemId, acc);
-      if (!flushTimersRef.current.has(itemId)) {
-        flushTimersRef.current.set(
-          itemId,
-          setTimeout(() => {
-            flushTimersRef.current.delete(itemId);
-            const text = textAccumRef.current.get(itemId) ?? "";
-            void upsertStreaming({ itemId, role, text }).catch(() => {});
-          }, 140)
-        );
+  const stopSpeaking = useCallback(() => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    isSpeakingRef.current = false;
+    setIsSpeakingState(false);
+    currentUtteranceRef.current = null;
+    if (activeRef.current) {
+      setOrb("listening");
+    }
+  }, [setOrb]);
+
+  const speakText = useCallback(
+    async (text: string) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+      const cleanText = sanitizeForSpeech(text);
+      if (!cleanText) {
+        if (activeRef.current) setOrb("listening");
+        return;
       }
-    },
-    [upsertStreaming]
-  );
 
-  const finishText = useCallback(
-    (itemId: string, role: "user" | "assistant", finalText: string | undefined, interrupted = false) => {
-      const timer = flushTimersRef.current.get(itemId);
-      if (timer) {
-        clearTimeout(timer);
-        flushTimersRef.current.delete(itemId);
+      stopSpeaking();
+
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      currentUtteranceRef.current = utterance;
+
+      // Select voice: Prefer UK English (British persona) -> any English
+      const voices = speechVoicesRef.current.length > 0 ? speechVoicesRef.current : window.speechSynthesis.getVoices();
+      const britishVoice = voices.find(
+        (v) =>
+          (v.lang === "en-GB" || v.name.includes("UK") || v.name.includes("British") || v.name.includes("Oliver") || v.name.includes("George")) &&
+          !v.name.includes("Female")
+      ) ?? voices.find((v) => v.lang.startsWith("en-GB")) ?? voices.find((v) => v.lang.startsWith("en"));
+
+      if (britishVoice) {
+        utterance.voice = britishVoice;
       }
-      const text = finalText ?? textAccumRef.current.get(itemId) ?? "";
-      textAccumRef.current.delete(itemId);
-      if (text.trim().length === 0) return;
-      void finalizeMessage({ itemId, role, text, interrupted }).catch(() => {});
-    },
-    [finalizeMessage]
-  );
 
-  /* -------------------------------------------------------------- */
-  /* Data channel event router                                       */
-  /* -------------------------------------------------------------- */
+      utterance.rate = 1.05;
+      utterance.pitch = 0.98;
 
-  const send = useCallback((event: Record<string, unknown>) => {
-    const dc = dcRef.current;
-    if (dc && dc.readyState === "open") dc.send(JSON.stringify(event));
-  }, []);
+      utterance.onstart = () => {
+        isSpeakingRef.current = true;
+        setIsSpeakingState(true);
+        setOrb("speaking");
+      };
 
-  const handleToolCall = useCallback(
-    async (callId: string, name: string, argsJson: string) => {
-      setOrb("executing");
-      let args: unknown = {};
-      try {
-        args = JSON.parse(argsJson || "{}");
-      } catch {
-        /* leave empty */
-      }
-      let result: Record<string, unknown>;
-      try {
-        result = await executeTool({ name, arguments: args });
-      } catch (err) {
-        result = { error: "execution_error", message: err instanceof Error ? err.message : String(err) };
-      }
-      if (result && (result as any).ok) {
-        setOrb("success", { flashBackTo: "thinking", flashMs: 900 });
-      } else {
-        setOrb("thinking");
-      }
-      send({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: callId,
-          output: JSON.stringify(result).slice(0, 30000),
-        },
-      });
-      send({ type: "response.create" });
-    },
-    [executeTool, send, setOrb]
-  );
-
-  const handleServerEvent = useCallback(
-    (event: any) => {
-      switch (event.type) {
-        case "session.created":
-          void logTimeline({ kind: "completed", label: "Jarvis online", detail: "Realtime link established" }).catch(() => {});
-          break;
-
-        case "input_audio_buffer.speech_started": {
-          if (speakingRef.current) {
-            // Barge-in: server cancels the response; clear buffered audio now.
-            send({ type: "output_audio_buffer.clear" });
-            void logTimeline({ kind: "speech_interrupted", label: "Speech interrupted", detail: "User barge-in" }).catch(() => {});
-            speakingRef.current = false;
-          }
+      utterance.onend = () => {
+        isSpeakingRef.current = false;
+        setIsSpeakingState(false);
+        currentUtteranceRef.current = null;
+        if (activeRef.current) {
           setOrb("listening");
-          break;
-        }
-
-        case "input_audio_buffer.speech_stopped":
-          if (orbStateRef.current === "listening") setOrb("thinking");
-          break;
-
-        case "conversation.item.input_audio_transcription.delta":
-          if (event.delta) streamText(event.item_id, "user", event.delta);
-          break;
-
-        case "conversation.item.input_audio_transcription.completed": {
-          finishText(event.item_id, "user", event.transcript);
-          const snippet = (event.transcript ?? "").slice(0, 80);
-          if (snippet.trim()) {
-            void logTimeline({ kind: "user_spoke", label: "User spoke", detail: snippet }).catch(() => {});
+          // Resume recognition if needed
+          try {
+            recognitionRef.current?.start();
+          } catch {
+            /* already started */
           }
-          break;
         }
+      };
 
-        case "response.created":
-          if (orbStateRef.current !== "executing") setOrb("thinking");
-          void logTimeline({ kind: "planning", label: "Planning response" }).catch(() => {});
-          break;
-
-        case "response.output_item.added": {
-          const item = event.item;
-          if (item?.type === "function_call" && item.call_id) {
-            callNamesRef.current.set(item.call_id, item.name);
-            void logTimeline({
-              kind: "intent_detected",
-              label: "Intent detected",
-              detail: String(item.name ?? "").replace(/_/g, " "),
-            }).catch(() => {});
+      utterance.onerror = (e) => {
+        if (e.error !== "canceled" && e.error !== "interrupted") {
+          console.warn("[nexus] TTS error:", e.error);
+        }
+        isSpeakingRef.current = false;
+        setIsSpeakingState(false);
+        currentUtteranceRef.current = null;
+        if (activeRef.current) {
+          setOrb("listening");
+          try {
+            recognitionRef.current?.start();
+          } catch {
+            /* already started */
           }
-          break;
         }
+      };
 
-        case "response.function_call_arguments.done": {
-          const name = event.name ?? callNamesRef.current.get(event.call_id) ?? "unknown";
-          void handleToolCall(event.call_id, name, event.arguments ?? "{}");
-          break;
-        }
-
-        case "response.output_audio_transcript.delta":
-          if (!speakingRef.current) {
-            speakingRef.current = true;
-            setOrb("speaking");
-          }
-          if (event.delta) streamText(event.item_id, "assistant", event.delta);
-          break;
-
-        case "response.output_audio_transcript.done":
-          finishText(event.item_id, "assistant", event.transcript);
-          break;
-
-        case "output_audio_buffer.started":
-          speakingRef.current = true;
-          setOrb("speaking");
-          break;
-
-        case "output_audio_buffer.stopped":
-        case "output_audio_buffer.cleared":
-          speakingRef.current = false;
-          if (orbStateRef.current === "speaking") setOrb("idle");
-          break;
-
-        case "response.done": {
-          void logTimeline({ kind: "response_generated", label: "Response generated" }).catch(() => {});
-          if (!speakingRef.current && orbStateRef.current !== "executing") {
-            setOrb("idle");
-          }
-          break;
-        }
-
-        case "error": {
-          const message = event.error?.message ?? "Realtime error";
-          // Benign cancellation races happen during barge-in; ignore them.
-          if (!/cancell?ation|no active response/i.test(message)) {
-            console.warn("[jarvis] realtime error:", event.error);
-            setOrb("error", { flashBackTo: "idle", flashMs: 1400 });
-          }
-          break;
-        }
-      }
+      window.speechSynthesis.speak(utterance);
     },
-    [finishText, handleToolCall, logTimeline, send, setOrb, streamText]
+    [setOrb, stopSpeaking]
   );
 
   /* -------------------------------------------------------------- */
-  /* Session lifecycle                                                */
+  /* Send message to Groq AI backend                                */
+  /* -------------------------------------------------------------- */
+
+  const submitUserMessage = useCallback(
+    async (userText: string) => {
+      const trimmed = userText.trim();
+      if (!trimmed || isProcessingRef.current) return;
+
+      isProcessingRef.current = true;
+      setOrb("thinking");
+
+      void logTimeline({ kind: "planning", label: "Planning response", detail: "Consulting Groq" }).catch(() => {});
+
+      try {
+        const token = authTokenRef.current || getAuthTokenFallback();
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            message: trimmed,
+            messages: conversationHistoryRef.current.slice(-10),
+            userLocation: userLocationRef.current ?? undefined,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          let errText = data.error ?? `Chat request failed (${res.status})`;
+          try {
+            const jsonStart = errText.indexOf("{");
+            if (jsonStart !== -1) {
+              const parsed = JSON.parse(errText.slice(jsonStart));
+              if (parsed?.error?.message) {
+                errText = parsed.error.message;
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+          throw new Error(errText);
+        }
+
+        const reply = data.response ?? "";
+
+        // Log timeline and record history
+        conversationHistoryRef.current.push({ role: "user", content: trimmed });
+        conversationHistoryRef.current.push({ role: "assistant", content: reply });
+
+        if (data.toolsExecuted && data.toolsExecuted.length > 0) {
+          const lastTool = data.toolsExecuted[data.toolsExecuted.length - 1];
+          setActiveTool(lastTool.name);
+          setTimeout(() => setActiveTool(null), 4000);
+        }
+
+        void logTimeline({ kind: "response_generated", label: "Response generated" }).catch(() => {});
+
+        // Save assistant reply to Convex transcript
+        const assistantItemId = "asst_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+        await finalizeMessage({
+          itemId: assistantItemId,
+          role: "assistant",
+          text: reply,
+        });
+
+        // Speak the reply through browser speech synthesis
+        await speakText(reply);
+      } catch (err: any) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("[nexus] Chat error:", message);
+        setError(message);
+        setOrb("error", { flashBackTo: "listening", flashMs: 2000 });
+        void logTimeline({ kind: "error", label: "Error encountered", detail: message }).catch(() => {});
+      } finally {
+        isProcessingRef.current = false;
+      }
+    },
+    [finalizeMessage, logTimeline, setOrb, speakText]
+  );
+
+  const sendTextMessage = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || isProcessingRef.current) return;
+
+      if (isSpeakingRef.current) {
+        stopSpeaking();
+      }
+
+      const itemId = "user_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+      await finalizeMessage({ itemId, role: "user", text: trimmed });
+      void logTimeline({ kind: "user_spoke", label: "User sent message", detail: trimmed.slice(0, 80) }).catch(() => {});
+
+      await submitUserMessage(trimmed);
+    },
+    [finalizeMessage, logTimeline, stopSpeaking, submitUserMessage]
+  );
+
+  /* -------------------------------------------------------------- */
+  /* Speech Recognition Setup                                       */
+  /* -------------------------------------------------------------- */
+
+  const commitTurn = useCallback(() => {
+    if (turnSilenceTimerRef.current) {
+      clearTimeout(turnSilenceTimerRef.current);
+      turnSilenceTimerRef.current = null;
+    }
+
+    const text = currentTurnTextRef.current.trim();
+    const itemId = currentTurnItemIdRef.current;
+
+    currentTurnTextRef.current = "";
+    currentTurnItemIdRef.current = null;
+
+    if (!text || !itemId) return;
+
+    // Finalize user message in Convex
+    void finalizeMessage({ itemId, role: "user", text }).catch(() => {});
+    void logTimeline({ kind: "user_spoke", label: "User spoke", detail: text.slice(0, 80) }).catch(() => {});
+
+    // Temporarily pause speech recognition while Jarvis processes & answers
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      /* ignore */
+    }
+
+    void submitUserMessage(text);
+  }, [finalizeMessage, logTimeline, submitUserMessage]);
+
+  const initSpeechRecognition = useCallback(() => {
+    if (typeof window === "undefined") return null;
+
+    const SpeechRecognition =
+      (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+
+    if (!SpeechRecognition) {
+      throw new Error("Speech recognition is not supported in this browser. Please use Google Chrome.");
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onstart = () => {
+      if (!isSpeakingRef.current && !isProcessingRef.current && activeRef.current) {
+        setOrb("listening");
+      }
+    };
+
+    recognition.onresult = (event: any) => {
+      // Barge-in: if Jarvis is speaking and the user speaks, interrupt Jarvis immediately!
+      if (isSpeakingRef.current) {
+        stopSpeaking();
+        void logTimeline({
+          kind: "speech_interrupted",
+          label: "Speech interrupted",
+          detail: "User barge-in",
+        }).catch(() => {});
+        setOrb("listening");
+      }
+
+      let interim = "";
+      let finalSegment = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const transcript = result[0]?.transcript ?? "";
+        if (result.isFinal) {
+          finalSegment += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+
+      // Initialize an item ID for the current user turn if not yet created
+      if (!currentTurnItemIdRef.current) {
+        currentTurnItemIdRef.current = "user_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+      }
+
+      const itemId = currentTurnItemIdRef.current;
+
+      if (finalSegment) {
+        currentTurnTextRef.current = (currentTurnTextRef.current + " " + finalSegment).trim();
+      }
+
+      const displayAcc = (currentTurnTextRef.current + " " + interim).trim();
+
+      if (displayAcc) {
+        void upsertStreaming({ itemId, role: "user", text: displayAcc }).catch(() => {});
+      }
+
+      // Reset turn silence timer
+      if (turnSilenceTimerRef.current) {
+        clearTimeout(turnSilenceTimerRef.current);
+      }
+
+      // If user pauses for 900ms after speaking, commit the turn
+      if (finalSegment || interim) {
+        turnSilenceTimerRef.current = setTimeout(() => {
+          commitTurn();
+        }, 900);
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      // Benign errors like no-speech can happen during silence; ignore them
+      if (event.error === "no-speech" || event.error === "aborted") return;
+      console.warn("[nexus] recognition error:", event.error);
+      if (event.error === "not-allowed") {
+        setError("Microphone permission was denied. Please allow microphone access in Chrome.");
+      }
+    };
+
+    recognition.onend = () => {
+      // If session is still active and not processing or speaking, keep listening
+      if (activeRef.current && !isProcessingRef.current && !isSpeakingRef.current) {
+        try {
+          recognition.start();
+        } catch {
+          /* already started */
+        }
+      }
+    };
+
+    return recognition;
+  }, [commitTurn, logTimeline, setOrb, stopSpeaking, upsertStreaming]);
+
+  /* -------------------------------------------------------------- */
+  /* Session lifecycle                                              */
   /* -------------------------------------------------------------- */
 
   const deactivate = useCallback(() => {
-    dcRef.current?.close();
-    pcRef.current?.close();
+    activeRef.current = false;
+    setActive(false);
+    isSpeakingRef.current = false;
+    isProcessingRef.current = false;
+
+    if (turnSilenceTimerRef.current) {
+      clearTimeout(turnSilenceTimerRef.current);
+      turnSilenceTimerRef.current = null;
+    }
+
+    stopSpeaking();
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        /* ignore */
+      }
+      recognitionRef.current = null;
+    }
+
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     void audioCtxRef.current?.close().catch(() => {});
-    dcRef.current = null;
-    pcRef.current = null;
+
     micStreamRef.current = null;
     audioCtxRef.current = null;
     micAnalyserRef.current = null;
-    outAnalyserRef.current = null;
-    speakingRef.current = false;
-    setActive(false);
+
     orbStateRef.current = "idle";
     setOrbStateRaw("idle");
     void setVoiceState({ orbState: "idle", sessionActive: false }).catch(() => {});
-  }, [setVoiceState]);
+  }, [setVoiceState, stopSpeaking]);
 
   const activate = useCallback(async () => {
     if (active || connecting) return;
     setConnecting(true);
     setError(null);
-    try {
-      // 1. Ephemeral token (authenticated request)
-      const tokenRes = await fetch("/api/realtime/token", {
-        method: "POST",
-        headers: authTokenRef.current
-          ? { Authorization: `Bearer ${authTokenRef.current}` }
-          : undefined,
-      });
-      const tokenData = await tokenRes.json();
-      if (!tokenRes.ok) throw new Error(tokenData.error ?? "Token request failed");
-      const ephemeralKey: string = tokenData.value ?? tokenData.client_secret?.value;
-      if (!ephemeralKey) throw new Error("No client secret in token response");
 
-      // 2. Mic + peer connection
-      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      // 1. Request microphone access for real-time audio visualization
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       micStreamRef.current = micStream;
 
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
-
-      const audioEl = document.createElement("audio");
-      audioEl.autoplay = true;
-      audioElRef.current = audioEl;
-
+      // 2. Setup Web Audio Analyser for Orb audio reactivity
       const audioCtx = new AudioContext();
       audioCtxRef.current = audioCtx;
       const micAnalyser = audioCtx.createAnalyser();
@@ -325,48 +539,22 @@ export function useRealtimeSession(): RealtimeSession {
       micAnalyserRef.current = micAnalyser;
       levelBufRef.current = new Uint8Array(new ArrayBuffer(512));
 
-      pc.ontrack = (e) => {
-        audioEl.srcObject = e.streams[0];
-        const outAnalyser = audioCtx.createAnalyser();
-        outAnalyser.fftSize = 512;
-        audioCtx.createMediaStreamSource(e.streams[0]).connect(outAnalyser);
-        outAnalyserRef.current = outAnalyser;
-      };
-      pc.addTrack(micStream.getAudioTracks()[0], micStream);
+      // 3. Setup Chrome Speech Recognition
+      const recognition = initSpeechRecognition();
+      if (!recognition) throw new Error("Could not initialize Speech Recognition");
+      recognitionRef.current = recognition;
+      recognition.start();
 
-      const dc = pc.createDataChannel("oai-events");
-      dcRef.current = dc;
-      dc.addEventListener("message", (e) => {
-        try {
-          handleServerEvent(JSON.parse(e.data));
-        } catch {
-          /* ignore malformed */
-        }
-      });
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-          deactivate();
-        }
-      };
-
-      // 3. SDP exchange
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls?model=gpt-realtime", {
-        method: "POST",
-        body: offer.sdp,
-        headers: {
-          Authorization: `Bearer ${ephemeralKey}`,
-          "Content-Type": "application/sdp",
-        },
-      });
-      if (!sdpResponse.ok) throw new Error(`SDP exchange failed (${sdpResponse.status})`);
-      await pc.setRemoteDescription({ type: "answer", sdp: await sdpResponse.text() });
-
+      activeRef.current = true;
       setActive(true);
-      setOrb("idle");
-      void setVoiceState({ orbState: "idle", sessionActive: true }).catch(() => {});
+      setOrb("listening");
+
+      void logTimeline({
+        kind: "completed",
+        label: "NEXUS online",
+        detail: "Neural assistant active (Groq AI)",
+      }).catch(() => {});
+      void setVoiceState({ orbState: "listening", sessionActive: true }).catch(() => {});
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -375,37 +563,40 @@ export function useRealtimeSession(): RealtimeSession {
     } finally {
       setConnecting(false);
     }
-  }, [active, connecting, deactivate, handleServerEvent, setOrb, setVoiceState]);
+  }, [active, connecting, deactivate, initSpeechRecognition, logTimeline, setOrb, setVoiceState]);
 
   const notifySystem = useCallback(
     (text: string) => {
-      send({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "system",
-          content: [{ type: "input_text", text }],
-        },
-      });
-      send({ type: "response.create" });
+      void submitUserMessage(text);
     },
-    [send]
+    [submitUserMessage]
   );
 
   const getLevel = useCallback((): number => {
-    const buf = levelBufRef.current;
-    if (!buf) return 0;
     const state = orbStateRef.current;
-    if (state === "speaking" && outAnalyserRef.current) {
-      return rms(outAnalyserRef.current, buf);
+
+    // While Jarvis is speaking, generate animated harmonic speech pulse for Orb
+    if (state === "speaking") {
+      const t = performance.now() / 1000;
+      const pulse = 0.38 + 0.22 * Math.sin(t * 7.5) + 0.14 * Math.sin(t * 14.2) + 0.08 * Math.sin(t * 22.1);
+      return Math.min(1, Math.max(0.1, pulse));
     }
-    if ((state === "listening" || state === "idle") && micAnalyserRef.current) {
-      return rms(micAnalyserRef.current, buf) * (state === "idle" ? 0.4 : 1);
+
+    // While listening or idle, read real microphone audio energy
+    const buf = levelBufRef.current;
+    if (buf && micAnalyserRef.current && (state === "listening" || state === "idle")) {
+      return rms(micAnalyserRef.current, buf) * (state === "idle" ? 0.35 : 1);
     }
+
+    if (state === "thinking" || state === "executing") {
+      const t = performance.now() / 1000;
+      return 0.15 + 0.1 * Math.sin(t * 4);
+    }
+
     return 0;
   }, []);
 
-  // Heartbeat while hosting a session so mirror tabs can detect staleness.
+  // Heartbeat while hosting a session so mirror tabs can detect staleness
   useEffect(() => {
     if (!active) return;
     const id = setInterval(() => {
@@ -414,7 +605,7 @@ export function useRealtimeSession(): RealtimeSession {
     return () => clearInterval(id);
   }, [active, setVoiceState]);
 
-  // Cleanup on unmount / tab close.
+  // Cleanup on unmount / tab close
   useEffect(() => {
     const onUnload = () => {
       void setVoiceState({ orbState: "idle", sessionActive: false }).catch(() => {});
@@ -425,5 +616,18 @@ export function useRealtimeSession(): RealtimeSession {
     };
   }, [setVoiceState]);
 
-  return { orbState, active, connecting, error, activate, deactivate, getLevel, notifySystem };
+  return {
+    orbState,
+    active,
+    connecting,
+    error,
+    activate,
+    deactivate,
+    getLevel,
+    notifySystem,
+    stopSpeaking,
+    sendTextMessage,
+    isSpeaking: isSpeakingState,
+    activeTool,
+  };
 }

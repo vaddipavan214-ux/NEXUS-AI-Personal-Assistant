@@ -14,8 +14,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Jarvis Control Center",
-  description: "A voice-first AI operating system",
+  title: "NEXUS – AI-Powered Personal Voice Assistant",
+  description: "One Intelligent Connection Point for Your Digital World.",
+  icons: {
+    icon: "/favicon.ico",
+  },
 };
 
 export default function RootLayout({
@@ -25,7 +28,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${grotesk.variable} ${geistMono.variable} antialiased`}>
+      <body className={`${grotesk.variable} ${geistMono.variable} antialiased selection:bg-violet-500/30 selection:text-white`}>
         <Providers>{children}</Providers>
       </body>
     </html>

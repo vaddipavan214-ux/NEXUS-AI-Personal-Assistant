@@ -25,8 +25,10 @@ const STATE_PARAMS: Record<OrbState, Omit<StateParams, "hue">> = {
   thinking: { intensity: 0.75, speed: 2.2, coreScale: 0.94, ringAlpha: 1, waveAlpha: 0 },
   executing: { intensity: 0.95, speed: 1.5, coreScale: 1.08, ringAlpha: 0.9, waveAlpha: 0 },
   speaking: { intensity: 1, speed: 0.8, coreScale: 1.06, ringAlpha: 0.6, waveAlpha: 1 },
+  interrupted: { intensity: 0.7, speed: 0.2, coreScale: 0.95, ringAlpha: 0.4, waveAlpha: 0 },
   error: { intensity: 0.9, speed: 0.25, coreScale: 0.92, ringAlpha: 0.4, waveAlpha: 0 },
   success: { intensity: 1, speed: 0.5, coreScale: 1.12, ringAlpha: 0.8, waveAlpha: 0 },
+  offline: { intensity: 0.2, speed: 0.1, coreScale: 0.85, ringAlpha: 0.1, waveAlpha: 0 },
 };
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;

@@ -15,6 +15,7 @@ interface Props {
   /** True when this tab hosts the live session (vs. mirroring another tab). */
   hosting?: boolean;
   connecting: boolean;
+  compact?: boolean;
 }
 
 export function JarvisOrb({
@@ -25,6 +26,7 @@ export function JarvisOrb({
   onDeactivate,
   hosting,
   connecting,
+  compact = false,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<OrbRenderer | null>(null);
@@ -57,7 +59,13 @@ export function JarvisOrb({
 
   return (
     <div className="relative flex flex-col items-center">
-      <div className="relative h-[340px] w-[420px] xl:h-[400px] xl:w-[500px]">
+      <div
+        className={`relative transition-all duration-500 ease-out ${
+          compact
+            ? "h-[110px] w-[180px]"
+            : "h-[340px] w-[420px] xl:h-[400px] xl:w-[500px]"
+        }`}
+      >
         <canvas ref={canvasRef} className="h-full w-full" />
 
         <AnimatePresence>
@@ -90,7 +98,7 @@ export function JarvisOrb({
       </div>
 
       {/* state readout */}
-      <div className="mt-1 flex h-6 items-center gap-2.5">
+      <div className={`flex items-center gap-2.5 transition-all duration-300 ${compact ? "h-4 -mt-1" : "mt-1 h-6"}`}>
         <AnimatePresence mode="wait">
           <motion.div
             key={active ? state : "offline"}
@@ -107,20 +115,31 @@ export function JarvisOrb({
                 boxShadow: "0 0 8px var(--state-color)",
               }}
             />
-            <span className="mono text-[11px] tracking-[0.3em] uppercase text-white/50">
-              {active ? ORB_STATE_LABELS[state] : "Offline"}
+            <span className={`mono uppercase text-white/50 tracking-[0.3em] ${compact ? "text-[9px]" : "text-[11px]"}`}>
+              {active ? ORB_STATE_LABELS[state] : "offline"}
             </span>
-            {active && hosting && onDeactivate && (
-              <button
-                onClick={onDeactivate}
-                className="mono ml-2 rounded border border-white/10 px-1.5 py-0.5 text-[9px] tracking-[0.2em] text-white/30 uppercase transition hover:border-red-300/40 hover:text-red-300/80"
-              >
-                Stand down
-              </button>
+            {active && hosting && (
+              <span className="mono text-[8px] text-cyan-300/40">host</span>
             )}
           </motion.div>
         </AnimatePresence>
       </div>
+
+      {active && (
+        <div className={`flex items-center gap-3 transition-all duration-300 ${compact ? "mt-0.5" : "mt-2"}`}>
+          <span className="mono text-[9px] tracking-[0.2em] text-white/20 uppercase">
+            Voice link active
+          </span>
+          {onDeactivate && (
+            <button
+              onClick={onDeactivate}
+              className="mono rounded border border-white/10 px-1.5 py-0.5 text-[8.5px] tracking-wider text-white/30 uppercase transition hover:border-red-400/40 hover:text-red-300"
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

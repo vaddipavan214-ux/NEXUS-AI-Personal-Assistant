@@ -44,3 +44,19 @@ export const setCard = mutation({
     }
   },
 });
+
+export const clearCard = mutation({
+  args: {
+    key: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    const existing = await ctx.db
+      .query("dashboard")
+      .withIndex("by_user_key", (q) => q.eq("userId", userId).eq("key", args.key))
+      .unique();
+    if (existing) {
+      await ctx.db.delete(existing._id);
+    }
+  },
+});
